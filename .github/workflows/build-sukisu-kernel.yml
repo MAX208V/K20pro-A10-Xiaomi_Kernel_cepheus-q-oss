@@ -1,7 +1,7 @@
 name: Build Redmi K20 Pro Kernel with SukiSU-Ultra
 
 on:
-  workflow_dispatch: # 允许在 GitHub Actions 页面手动触发
+  workflow_dispatch:
   push:
     branches:
       - main
@@ -18,74 +18,75 @@ jobs:
     - name: Setup Build Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync test tool schedtool squashfs-tools xsltproc zip zlib1g-dev python3 python2
         sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
 
     - name: Download Proton Clang Toolchain
       run: |
-        # 推荐使用 Proton Clang 编译安卓 10 内核
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang-toolchain
 
     - name: Clone Xiaomi Kernel Source
       run: |
-        # 拉取 cepheus-q-oss 分支的内核源码
         git clone --depth=1 -b cepheus-q-oss https://github.com/MiCode/Xiaomi_Kernel_OpenSource.git kernel-source
 
     - name: Integrate SukiSU-Ultra
       run: |
         cd kernel-source
-        # 执行非 GKI 设备的 SukiSU-Ultra 注入脚本
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
-    - name: Patch Kernel Config
+    - name: Patch Kernel Config & Makefile
       run: |
         cd kernel-source
-        # 定义您的 defconfig 路径 (通常为 vendor/cepheus_defconfig 或 cepheus_defconfig)
-        DEFCONFIG_PATH="arch/arm64/configs/vendor/cepheus_defconfig"
         
-        # 如果 vendor 目录下没有，则尝试根目录的 cepheus_defconfig
-        if [ ! -f "$DEFCONFIG_PATH" ]; then
-          DEFCONFIG_PATH="arch/arm64/configs/cepheus_defconfig"
-        fi
+        # 1. 解决 yylloc 重定义错误 (针对 GCC 10+)
+        sed -i 's/^HOSTCFLAGS   :=/HOSTCFLAGS   := -fcommon/' Makefile
+        sed -i 's/^CFLAGS   :=/CFLAGS   := -fcommon/' Makefile
+
+        # 2. 修改 defconfig
+        DEFCONFIG_PATH="arch/arm64/configs/vendor/cepheus_defconfig"
+        [ ! -f "$DEFCONFIG_PATH" ] && DEFCONFIG_PATH="arch/arm64/configs/cepheus_defconfig"
 
         echo "Appending configs to $DEFCONFIG_PATH..."
-        
-        # 追加必需的配置
-        echo "" >> "$DEFCONFIG_PATH"
-        echo "# SukiSU-Ultra Required Configs" >> "$DEFCONFIG_PATH"
-        echo "CONFIG_KPM=y" >> "$DEFCONFIG_PATH"
-        echo "CONFIG_KALLSYMS=y" >> "$DEFCONFIG_PATH"
-        echo "CONFIG_KALLSYMS_ALL=y" >> "$DEFCONFIG_PATH"
+        {
+          echo "CONFIG_KPM=y"
+          echo "CONFIG_DEBUG_KERNEL=y"
+          echo "CONFIG_KALLSYMS=y"
+          echo "CONFIG_KALLSYMS_ALL=y"
+        } >> "$DEFCONFIG_PATH"
 
     - name: Build Kernel
       run: |
         cd kernel-source
         
-        # 设置环境变量
-        export PATH="$GITHUB_WORKSPACE/clang-toolchain/bin:$PATH"
-        export ARCH=arm64
-        export SUBARCH=arm64
-        export CROSS_COMPILE=aarch64-linux-gnu-
-        export CROSS_COMPILE_ARM32=arm-linux-gnueabi-
-        export CC=clang
+        # 定义路径
+        CLANG_DIR="$GITHUB_WORKSPACE/clang-toolchain/bin"
+        export PATH="$CLANG_DIR:$PATH"
         
-        # 再次确认 defconfig 名称用于 make
-        DEFCONFIG_NAME="vendor/cepheus_defconfig"
-        if [ ! -f "arch/arm64/configs/$DEFCONFIG_NAME" ]; then
-          DEFCONFIG_NAME="cepheus_defconfig"
-        fi
+        # 编译参数：明确指定使用 Clang 及其配套工具
+        MAKE_ARGS=(
+          O=out
+          ARCH=arm64
+          CC=clang
+          CLANG_TRIPLE=aarch64-linux-gnu-
+          CROSS_COMPILE=aarch64-linux-gnu-
+          CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+          HOSTCC=gcc
+          HOSTCXX=g++
+        )
 
-        # 生成配置和编译
-        make O=out $DEFCONFIG_NAME
-        make -j$(nproc --all) O=out \
-                              CC=clang \
-                              CROSS_COMPILE=aarch64-linux-gnu- \
-                              CROSS_COMPILE_ARM32=arm-linux-gnueabi-
+        # 确定配置文件
+        DEFCONFIG_NAME="vendor/cepheus_defconfig"
+        [ ! -f "arch/arm64/configs/$DEFCONFIG_NAME" ] && DEFCONFIG_NAME="cepheus_defconfig"
+
+        # 开始构建
+        make "${MAKE_ARGS[@]}" "$DEFCONFIG_NAME"
+        make -j$(nproc --all) "${MAKE_ARGS[@]}"
 
     - name: Upload Kernel Artifact
       uses: actions/upload-artifact@v4
       with:
         name: Image.gz-dtb-cepheus-SukiSU
-        # 上传编译好的内核镜像，K20 Pro 通常需要 Image.gz-dtb
-        path: kernel-source/out/arch/arm64/boot/Image.gz-dtb
+        path: |
+          kernel-source/out/arch/arm64/boot/Image.gz-dtb
+          kernel-source/out/arch/arm64/boot/Image.gz
         compression-level: 9
