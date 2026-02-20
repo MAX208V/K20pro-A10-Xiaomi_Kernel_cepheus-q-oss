@@ -1,4 +1,4 @@
-name: Build Redmi K20 Pro Kernel with SukiSU-Ultra
+name: Build Redmi K20 Pro Kernel (SukiSU-Ultra)
 
 on:
   workflow_dispatch:
@@ -18,10 +18,15 @@ jobs:
     - name: Setup Build Environment
       run: |
         sudo apt-get update
-        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev python3
+        sudo apt-get install -y bc bison build-essential ccache curl flex g++-multilib gcc-multilib git gnupg gperf \
+          imagemagick lib32ncurses5-dev lib32readline-dev lib32z1-dev liblz4-tool libncurses5-dev libsdl1.2-dev \
+          libssl-dev libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev \
+          python3 python2
         sudo apt-get install -y gcc-aarch64-linux-gnu gcc-arm-linux-gnueabi
+
     - name: Download Proton Clang Toolchain
       run: |
+        # 使用 Proton Clang 解决 Android 10 兼容性问题
         git clone --depth=1 https://github.com/kdrag0n/proton-clang.git clang-toolchain
 
     - name: Clone Xiaomi Kernel Source
@@ -31,21 +36,22 @@ jobs:
     - name: Integrate SukiSU-Ultra
       run: |
         cd kernel-source
+        # 执行 SukiSU-Ultra 非 GKI 注入脚本
         curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s nongki
 
     - name: Patch Kernel Config & Makefile
       run: |
         cd kernel-source
         
-        # 1. 解决 yylloc 重定义错误 (针对 GCC 10+)
+        # 1. 修复 GCC 10+ 导致的 yylloc 多重定义错误 (multiple definition of 'yylloc')
         sed -i 's/^HOSTCFLAGS   :=/HOSTCFLAGS   := -fcommon/' Makefile
         sed -i 's/^CFLAGS   :=/CFLAGS   := -fcommon/' Makefile
 
-        # 2. 修改 defconfig
+        # 2. 定位并修改 defconfig
         DEFCONFIG_PATH="arch/arm64/configs/vendor/cepheus_defconfig"
         [ ! -f "$DEFCONFIG_PATH" ] && DEFCONFIG_PATH="arch/arm64/configs/cepheus_defconfig"
 
-        echo "Appending configs to $DEFCONFIG_PATH..."
+        echo "Appending SukiSU-Ultra requirements to $DEFCONFIG_PATH..."
         {
           echo "CONFIG_KPM=y"
           echo "CONFIG_DEBUG_KERNEL=y"
@@ -57,11 +63,11 @@ jobs:
       run: |
         cd kernel-source
         
-        # 定义路径
+        # 环境准备
         CLANG_DIR="$GITHUB_WORKSPACE/clang-toolchain/bin"
         export PATH="$CLANG_DIR:$PATH"
         
-        # 编译参数：明确指定使用 Clang 及其配套工具
+        # 核心编译参数：添加 -fno-integrated-as 解决 -EL 报错
         MAKE_ARGS=(
           O=out
           ARCH=arm64
@@ -71,21 +77,43 @@ jobs:
           CROSS_COMPILE_ARM32=arm-linux-gnueabi-
           HOSTCC=gcc
           HOSTCXX=g++
+          KCFLAGS=-fno-integrated-as
         )
 
-        # 确定配置文件
+        # 确定配置文件名
         DEFCONFIG_NAME="vendor/cepheus_defconfig"
         [ ! -f "arch/arm64/configs/$DEFCONFIG_NAME" ] && DEFCONFIG_NAME="cepheus_defconfig"
 
         # 开始构建
         make "${MAKE_ARGS[@]}" "$DEFCONFIG_NAME"
-        make -j$(nproc --all) "${MAKE_ARGS[@]}"
+        make -j$(nproc --all) "${MAKE_ARGS[@]}" CC=clang
 
-    - name: Upload Kernel Artifact
+    - name: Package with AnyKernel3
+      if: success()
+      run: |
+        # 克隆 AnyKernel3 模板
+        git clone --depth=1 https://github.com/osm0sis/AnyKernel3.git AnyKernel3
+        
+        # 复制编译好的内核镜像
+        if [ -f "kernel-source/out/arch/arm64/boot/Image.gz-dtb" ]; then
+          cp kernel-source/out/arch/arm64/boot/Image.gz-dtb AnyKernel3/
+        elif [ -f "kernel-source/out/arch/arm64/boot/Image.gz" ]; then
+          cp kernel-source/out/arch/arm64/boot/Image.gz AnyKernel3/
+        fi
+        
+        # 配置 AnyKernel3 参数 (针对 K20 Pro)
+        cd AnyKernel3
+        sed -i 's/device.name1=maguro/device.name1=cepheus/' anykernel.sh
+        sed -i 's/device.name2=toroplus/device.name2=raphael/' anykernel.sh
+        sed -i 's/block=\/dev\/block\/platform\/omap\/omap_hsmmc.0\/by-name\/boot;/block=auto;/' anykernel.sh
+        
+        # 打包
+        zip -r9 ../K20Pro-SukiSU-Kernel.zip * -x .git README.md
+
+    - name: Upload Build Artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: Image.gz-dtb-cepheus-SukiSU
+        name: K20Pro-Kernel-SukiSU-Update
         path: |
+          *.zip
           kernel-source/out/arch/arm64/boot/Image.gz-dtb
-          kernel-source/out/arch/arm64/boot/Image.gz
-        compression-level: 9
